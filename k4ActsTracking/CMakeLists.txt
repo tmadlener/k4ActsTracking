@@ -26,7 +26,7 @@ install(TARGETS k4ActsTracking
   INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
 )
 
-file(GLOB _plugin_sources src/components/*.cpp)
+file(GLOB _plugin_sources src/components/*.c*)
 set(ACTS_PLUGIN_TARGETS "Acts::Core;Acts::PluginDD4hep")
 if (Acts_VERSION VERSION_LESS 43.0.0)
   set(ACTS_PLUGIN_TARGETS "ActsCore;ActsPluginDD4hep")
