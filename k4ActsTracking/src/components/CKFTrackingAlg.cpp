@@ -68,6 +68,7 @@
 #include <Acts/TrackFinding/TrackStateCreator.hpp>
 #include <Acts/TrackFitting/GainMatrixUpdater.hpp>
 #include <Acts/Utilities/RangeXD.hpp>
+#include <Acts/Utilities/TrackHelpers.hpp>
 
 // TBB
 #include <tbb/blocked_range.h>
@@ -133,9 +134,12 @@ private:
                                                     edm4hep::TrackCollection&           seedCollection,
                                                     Acts::MagneticFieldProvider::Cache& magCache) const;
 
-  StatusCode tracking(const std::vector<Acts::BoundTrackParameters>& paramseeds, const CKF& trackFinder,
-                      const TrackFinderOptions& ckfOptions, Acts::MagneticFieldProvider::Cache& magCache,
-                      edm4hep::TrackCollection& trackCollection) const;
+  StatusCode tracking(const std::vector<Acts::BoundTrackParameters>& paramseeds,
+                      const CKF& trackFinder, const TrackFinderOptions& ckfOptions,
+                      const Propagator& extrapPropagator, const Acts::PerigeeSurface& perigeeSurface,
+                      Propagator::Options<>& extrapOptions,
+                      Acts::MagneticFieldProvider::Cache& magCache,
+                      edm4hep::TrackCollection&           trackCollection) const;
 
   // ----- Gaudi properties --------------------------------------------------
 
@@ -446,6 +450,13 @@ std::tuple<edm4hep::TrackCollection, edm4hep::TrackCollection> CKFTrackingAlg::o
   Propagator propagator(std::move(stepper), std::move(navigator));
   CKF        trackFinder(std::move(propagator));
 
+  // For fitting to IP
+  Stepper    extrapStepper(m_actsGeoSvc->magneticField());
+  Navigator  extrapNavigator(navigatorCfg);
+  Propagator extrapPropagator(std::move(extrapStepper), std::move(extrapNavigator));
+  auto perigeeSurface =
+    Acts::Surface::makeShared<Acts::PerigeeSurface>(Acts::Vector3{0., 0., 0.});
+
   Acts::MeasurementSelector::Config measurementSelectorCfg = {
       {Acts::GeometryIdentifier(), {{}, {m_CKF_chi2CutOff}, {(std::size_t)(m_CKF_numMeasurementsCutOff)}}}};
 
@@ -453,6 +464,11 @@ std::tuple<edm4hep::TrackCollection, edm4hep::TrackCollection> CKFTrackingAlg::o
   pOptions.maxSteps = 10000;
   if (m_propagateBackward) {
     pOptions.direction = Acts::Direction::Backward();
+  }
+  Propagator::Options<> extrapOptions{geoCtx, magCtx};
+  extrapOptions.maxSteps = 10000;
+  if (m_propagateBackward) {
+    extrapOptions.direction = Acts::Direction::Backward();
   }
 
   Acts::GainMatrixUpdater             kfUpdater;
@@ -503,7 +519,9 @@ std::tuple<edm4hep::TrackCollection, edm4hep::TrackCollection> CKFTrackingAlg::o
                                         rMiddleSPRange, spContainer.size(), seedCollection, magCache);
       if (!m_runCKF)
         continue;
-      if (!tracking(paramseeds, trackFinder, ckfOptions, magCache, trackCollection).isSuccess()) {
+      if (!tracking(paramseeds, trackFinder, ckfOptions,
+                    extrapPropagator, *perigeeSurface, extrapOptions,
+                    magCache, trackCollection).isSuccess()) {
         warning() << "Tracking failed for this event" << endmsg;
       }
     }
@@ -606,9 +624,12 @@ std::vector<Acts::BoundTrackParameters> CKFTrackingAlg::findSeeds(
   return paramseeds;
 }
 
-StatusCode CKFTrackingAlg::tracking(const std::vector<Acts::BoundTrackParameters>& paramseeds, const CKF& trackFinder,
-                                    const TrackFinderOptions& ckfOptions, Acts::MagneticFieldProvider::Cache& magCache,
-                                    edm4hep::TrackCollection& trackCollection) const {
+StatusCode CKFTrackingAlg::tracking(const std::vector<Acts::BoundTrackParameters>& paramseeds,
+                                    const CKF& trackFinder, const TrackFinderOptions& ckfOptions,
+                                    const Propagator& extrapPropagator, const Acts::PerigeeSurface& perigeeSurface,
+                                    Propagator::Options<>& extrapOptions,
+                                    Acts::MagneticFieldProvider::Cache& magCache,
+                                    edm4hep::TrackCollection&           trackCollection) const {
   const Acts::GeometryContext geoCtx = Acts::GeometryContext::dangerouslyDefaultConstruct();
 
   debug() << "Starting CKF track finding with " << paramseeds.size() << " seeds." << endmsg;
@@ -628,6 +649,20 @@ StatusCode CKFTrackingAlg::tracking(const std::vector<Acts::BoundTrackParameters
         auto smoothResult = Acts::smoothTrack(geoCtx, trackTip);
         if (!smoothResult.ok()) {
           warning() << "Track smoothing error: " << smoothResult.error() << endmsg;
+          continue;
+        }
+
+        auto extrapResult = Acts::extrapolateTrackToReferenceSurface(
+            trackTip,
+            perigeeSurface,
+            extrapPropagator,
+            extrapOptions,
+            Acts::TrackExtrapolationStrategy::firstOrLast
+        );
+
+        if (!extrapResult.ok()) {
+          warning() << "Track extrapolation to perigee failed: "
+                    << extrapResult.error() << endmsg;
           continue;
         }
 

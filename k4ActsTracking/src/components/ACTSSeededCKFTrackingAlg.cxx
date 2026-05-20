@@ -293,6 +293,13 @@ std::tuple<edm4hep::TrackCollection, edm4hep::TrackCollection> ACTSSeededCKFTrac
   Navigator  navigator(navigatorCfg);
   Propagator propagator(std::move(stepper), std::move(navigator));
   CKF        trackFinder(std::move(propagator));
+  
+  // For fitting to IP
+  Stepper    extrapStepper(magneticField());
+  Navigator  extrapNavigator(navigatorCfg);
+  Propagator extrapPropagator(std::move(extrapStepper), std::move(extrapNavigator));
+  auto perigeeSurface =
+      Acts::Surface::makeShared<Acts::PerigeeSurface>(Acts::Vector3{0., 0., 0.});
 
   // Set the options
   Acts::MeasurementSelector::Config measurementSelectorCfg = {
@@ -303,10 +310,12 @@ std::tuple<edm4hep::TrackCollection, edm4hep::TrackCollection> ACTSSeededCKFTrac
   if (m_propagateBackward) {
     pOptions.direction = Acts::Direction::Backward();
   }
-
-  // Construct a perigee surface as the target surface
-  std::shared_ptr<Acts::PerigeeSurface> perigeeSurface =
-      Acts::Surface::makeShared<Acts::PerigeeSurface>(Acts::Vector3{0., 0., 0.});
+  
+  Propagator::Options<> extrapOptions{geometryContext(), magneticFieldContext()};
+  extrapOptions.maxSteps = 10000;
+  if (m_propagateBackward) {
+    extrapOptions.direction = Acts::Direction::Backward();
+  }
 
   Acts::GainMatrixUpdater kfUpdater;
 
@@ -365,7 +374,9 @@ std::tuple<edm4hep::TrackCollection, edm4hep::TrackCollection> ACTSSeededCKFTrac
       if (!m_runCKF)
         continue;
 
-      if (!tracking(paramseeds, trackFinder, ckfOptions, magCache, trackCollection).isSuccess()) {
+      if (!tracking(paramseeds, trackFinder, ckfOptions,
+                    extrapPropagator, *perigeeSurface, extrapOptions,
+                    magCache, trackCollection).isSuccess()) {
         warning() << "Tracking failed for this event" << endmsg;
       }
     }
@@ -389,6 +400,8 @@ std::tuple<edm4hep::TrackCollection, edm4hep::TrackCollection> ACTSSeededCKFTrac
 // CKF tracking,
 StatusCode ACTSSeededCKFTrackingAlg::tracking(const std::vector<Acts::BoundTrackParameters>& paramseeds,
                                               const CKF& trackFinder, const TrackFinderOptions& ckfOptions,
+                                              const Propagator& extrapPropagator, const Acts::PerigeeSurface& perigeeSurface,
+                                              Propagator::Options<>& extrapOptions,
                                               Acts::MagneticFieldProvider::Cache& magCache,
                                               edm4hep::TrackCollection&           trackCollection) const {
   // Initialize track finder
@@ -413,6 +426,19 @@ StatusCode ACTSSeededCKFTrackingAlg::tracking(const std::vector<Acts::BoundTrack
         auto smoothResult = Acts::smoothTrack(geometryContext(), trackTip);
         if (!smoothResult.ok()) {
           warning() << "Track smoothing error: " << smoothResult.error() << endmsg;
+          continue;
+        }
+        auto extrapResult = Acts::extrapolateTrackToReferenceSurface(
+            trackTip,
+            perigeeSurface,
+            extrapPropagator,
+            extrapOptions,
+            Acts::TrackExtrapolationStrategy::firstOrLast
+        );
+
+        if (!extrapResult.ok()) {
+          warning() << "Track extrapolation to perigee failed: "
+                    << extrapResult.error() << endmsg;
           continue;
         }
 
